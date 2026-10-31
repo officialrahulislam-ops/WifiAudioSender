@@ -15,9 +15,14 @@ import java.net.SocketTimeoutException
 import java.nio.ByteBuffer
 
 /**
- * UDP discovery while the app is on screen:
- *  - listens for PC beacons (to fill the receiver list) and PC invites,
- *  - broadcasts its own beacon so the PC can list this phone.
+ * UDP discovery while the app is on screen.
+ *
+ * The app has TWO modes (Sender / Receiver) and the discovery logic adapts:
+ * - in Sender mode  -> listens for PC beacons, broadcasts its own sender beacon, connects to PC
+ * - in Receiver mode -> listens for PC sender beacons, broadcasts its own receiver beacon, waits for PC to connect
+ *
+ * The mode is read from Prefs at start time. When the mode changes, call stop() + start()
+ * to restart discovery with the correct role filters.
  */
 class Discovery(
     private val context: Context,
@@ -34,6 +39,7 @@ class Discovery(
     private val main = Handler(Looper.getMainLooper())
     private val seen = LinkedHashMap<String, Pair<ReceiverInfo, Long>>()
     private var lastKey = ""
+    private val prefs: Prefs = Prefs(context)
 
     fun start() {
         if (running) return
@@ -53,6 +59,15 @@ class Discovery(
         try { socket?.close() } catch (_: Exception) { }
         try { multicastLock?.takeIf { it.isHeld }?.release() } catch (_: Exception) { }
     }
+
+    /** Returns true if this app is currently in "Receiver" mode (listening for PC to connect). */
+    private fun isReceiverMode(): Boolean = prefs.mode == "receiver"
+
+    /** Returns the role this app broadcasts. Sender mode => "sender", Receiver mode => "receiver" */
+    private fun myRole(): String = if (isReceiverMode()) "receiver" else "sender"
+
+    /** Returns the role we are interested in hearing beacons from (opposite of our own). */
+    private fun listenRole(): String = if (isReceiverMode()) "sender" else "receiver"
 
     private fun listen() {
         try {
@@ -77,8 +92,16 @@ class Discovery(
 
     private fun handle(text: String, ip: String) {
         val j = try { JSONObject(text) } catch (_: Exception) { return }
-        if (j.optString("app") != Protocol.APP_ID || j.optString("role") != "receiver") return
-        val info = ReceiverInfo(j.optString("name", ip), ip, j.optInt("port", Protocol.DEFAULT_TCP_PORT))
+        if (j.optString("app") != Protocol.APP_ID) return
+        // Only process beacons from the role we want to find (opposite role)
+        if (j.optString("role") != listenRole()) return
+
+        // Determine port: for receiver -> sender flow, the receiver listens on the PC port.
+        // For sender -> receiver flow, the receiver listens on its own port.
+        // We use a generic approach: store the port from the beacon.
+        val port = j.optInt("port", Protocol.DEFAULT_TCP_PORT)
+        val info = ReceiverInfo(j.optString("name", ip), ip, port)
+
         if (j.optString("type") == "invite") {
             val code = j.optString("code")
             main.post { onInvite(info, code) }
@@ -104,7 +127,9 @@ class Discovery(
                 val s = socket
                 if (s != null) {
                     val json = JSONObject().put("app", Protocol.APP_ID).put("v", Protocol.VERSION)
-                        .put("role", "sender").put("name", deviceName).put("busy", isBusy())
+                        .put("role", myRole()).put("name", deviceName)
+                        .put("busy", isBusy())
+                        .put("port", if (isReceiverMode()) Protocol.DEFAULT_TCP_PORT else 0)
                     val bytes = json.toString().toByteArray()
                     for (addr in broadcastTargets()) {
                         try { s.send(DatagramPacket(bytes, bytes.size, addr, Protocol.DISCOVERY_PORT)) }

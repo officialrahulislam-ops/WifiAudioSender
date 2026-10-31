@@ -24,4 +24,8 @@ class Prefs(context: Context) {
     var savedVolume: Int
         get() = sp.getInt("saved_volume", -1)
         set(v) = sp.edit().putInt("saved_volume", v).apply()
+    /** Streaming mode: "sender" (capture & send) or "receiver" (play incoming). */
+    var mode: String
+        get() = sp.getString("mode", "sender") ?: "sender"
+        set(v) = sp.edit().putString("mode", v).apply()
 }
